@@ -15,6 +15,12 @@ const int NUM_SAMPLES = 100;                         // Number of ADC samples to
 
 unsigned long previousMillis = 0;
 
+float calibrationA0[NUM_SAMPLES];
+float calibrationA1[NUM_SAMPLES];
+float calibrationA2[NUM_SAMPLES];
+float* calibrationMeasures[3] = {calibrationA0, calibrationA1, calibrationA2};
+int j = 0;
+
 void setup() {
   Serial.begin(9600);
   analogReadResolution(14);                         // Set ADC resolution to 14-bit
@@ -32,6 +38,25 @@ void setup() {
 
 void loop() {
   unsigned long currentMillis = millis();
+
+  if (calibrationA0[NUM_SAMPLES] != 0.0) {
+    float sumA0 = 0;
+    float sumA1 = 0;
+    float sumA2 = 0;
+    for (int i = 0; i < NUM_SAMPLES;i++) {
+      sumA0 += calibrationA0[i];
+      sumA1 += calibrationA1[i];
+      sumA2 += calibrationA2[i];
+    }
+    sumA0 /= NUM_SAMPLES;
+    sumA1 /= NUM_SAMPLES;
+    sumA2 /= NUM_SAMPLES;
+
+    float sum = (sumA0 + sumA1 + sumA2)/3;
+    Serial.println(sum-sumA0);
+    Serial.println(sum-sumA1);
+    Serial.println(sum-sumA2);
+  }
 
   if (currentMillis - previousMillis >= INTERVAL) {
     long jitter = currentMillis - (previousMillis + INTERVAL);
@@ -57,6 +82,9 @@ void loop() {
           temperatures[i] -= 1.05;  // Calibration offset in °C
         }
       }
+      // Calibration
+      calibrationMeasures[i][j] = avgADC;
+      j++;
     }
 
     // Print CSV record
