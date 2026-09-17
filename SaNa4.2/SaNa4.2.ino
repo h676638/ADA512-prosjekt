@@ -62,6 +62,13 @@ void loop() {
     }
 
     // ---- calibration set: one record per cycle, bounded by NUM_CAL ----
+
+    // To calibrate:
+    // Let the station rest with the heater off for 30 min.
+    // Check that no channel moves more than 0.02 K over two minutes.
+    // Send cal and wait two minutes.
+    // Copy the three numbers from the # k_i = line into K_CAL and re-flash.
+    
     if (calCount >= 0 && calCount < NUM_CAL) {
       bool valid = true;
       for (int i = 0; i < NUM_SENSORS; i++) {
