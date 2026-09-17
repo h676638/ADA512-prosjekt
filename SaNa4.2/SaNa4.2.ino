@@ -18,7 +18,7 @@ unsigned long previousMillis = 0;
 const int NUM_CAL = 120;                            // records in the calibration set (2 min at 1 s)
 float calR[NUM_SENSORS][NUM_CAL];
 int   calCount = -1;                                // -1 = not collecting
-const float K_CAL[NUM_SENSORS] = {1.0, 1.0, 1.0};   // fill in from the "# k_i" line    
+const float K_CAL[NUM_SENSORS] = {0.98416, 1.03903 0.97898};   // fill in from the "# k_i" line    
 
 void setup() {
   Serial.begin(9600);
