@@ -143,9 +143,12 @@ void loop() {
 }
 
 // Average multiple ADC samples for noise reduction
+// 100 readings spaced 200 µs apart = one 50 Hz period (20 ms)
 float averageADC(int pin, int samples) {
   long sum = 0;
+  unsigned long start = micros();
   for (int i = 0; i < samples; i++) {
+    while (micros() - start < (unsigned long)i * 200UL) { }  // wait for sample instant
     sum += analogRead(pin);
   }
   return (float)sum / samples;
