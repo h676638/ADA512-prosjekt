@@ -373,7 +373,7 @@ enum Mode { IDLE,
             AMBIENT,
             RUN };
 Mode mode = IDLE;
-float T_amb = NAN;  // 01.10.26
+float T_amb = 22.082;  // 01.10.26
 
 uint8_t phaseIdx = 0;
 bool approach = false;     // before F0: bring c to 5 K
