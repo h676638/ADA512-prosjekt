@@ -1,5 +1,0 @@
-> ?
-# method=2,KR=0.0000,TI=0.0,KI=0.00000,H=0.50,L=0.0,DELTA_T=16.60,T_P=307,CTRL_CH=2,T_amb=22.082
-> A
-# measuring ambient, 180 s, heater off
-# T_amb=23.231 C, samples=24653 - note it: after an upload enter it with T
