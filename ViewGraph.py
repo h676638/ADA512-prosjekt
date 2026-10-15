@@ -10,14 +10,16 @@ df = pd.read_csv(
     comment="=",
     names=["Timestamp", "Status", "Val1", "Temp1", "Val2", "Temp2", "Val3", "Temp3"],
 )
+df["Timestamp"] = pd.to_numeric(df["Timestamp"], errors="coerce")
+df = df.dropna(subset=["Timestamp"])
 df["Timestamp"] = df["Timestamp"]/1000.0
 # 2. Plot the data
 plt.figure(figsize=(10, 6))
 
 # Example: Plotting Val1, Val2, and Val3 over time
-plt.plot(df["Timestamp"], df["Val1"], label="Sensor 1", marker="o")
-plt.plot(df["Timestamp"], df["Val2"], label="Sensor 2", marker="s")
-plt.plot(df["Timestamp"], df["Val3"], label="Sensor 3", marker="^")
+plt.plot(df["Timestamp"], df["Temp1"], label="Sensor 1", marker="o")
+plt.plot(df["Timestamp"], df["Temp2"], label="Sensor 2", marker="s")
+plt.plot(df["Timestamp"], df["Temp3"], label="Sensor 3", marker="^")
 
 # 3. Formatting
 plt.title("PuTTY Log Data Visualization")
