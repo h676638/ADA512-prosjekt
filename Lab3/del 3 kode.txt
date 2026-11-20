@@ -1,0 +1,586 @@
+// ADA512 LAB 3 template, UNO R4 WiFi. Version 2026-11-01 (broker 192.168.1.101, login optional).
+//
+// The template provides: the Wi-Fi connection, the connection to the broker (with or without a login),
+// a reconnection that does not stop loop(), the copy of the serial console to the broker and the reset
+// through the broker. It contains no measurement, no controller and no plant: the group writes them in
+// the GROUP PART below (LAB 3, "What the template provides and what the group writes").
+//
+// Wi-Fi password and broker login: arduino_secrets.h (never in this file).
+
+#include <WiFiS3.h>
+#include <ArduinoMqttClient.h>
+#include "arduino_secrets.h"
+
+// ===================================================================================================
+// SETTINGS (filled in by the group)
+// ===================================================================================================
+
+const char BROKER[] = "192.168.1.101";   // from the access data of the group
+const int  PORT = 1883;
+const char STATION[] = "hl-06";               // the station of the group, as in the access data
+
+const String SHARED_MEAS = "hl/shared/meas";
+const String SHARED_PID = "hl/shared/pid";
+const String SHARED_SP = "hl/shared/setpoint";
+
+
+// Topics under the adopted agreement. An empty topic switches the function off.
+const char TOPIC_CONSOLE[] = "hl/hl-06/console";         // copy of the serial console (never retained)
+const char TOPIC_RESET[] = "";           // message "reset" restarts the board (retained messages ignored)
+
+// ===================================================================================================
+// FIXED PART (not changed by the group)
+// ===================================================================================================
+
+const unsigned long RETRY_MS = 10000;    // reconnection attempts not more often than this
+const unsigned long WIFI_TIMEOUT_MS = 3000;    // longest wait for the Wi-Fi in one attempt
+const unsigned long BROKER_TIMEOUT_MS = 2000;  // longest wait for the broker in one attempt
+
+WiFiClient wifi;
+MqttClient mqtt(wifi);
+unsigned long lastAttempt = 0;
+bool firstAttempt = true;
+
+void groupSetup();
+void groupConnected();
+void groupLoop();
+void groupMessage(const String &topic, const String &payload, bool retained);
+
+// Prints a line on the serial console and, when connected, publishes the same line on TOPIC_CONSOLE.
+void console(const String &line) {
+  Serial.println(line);
+  if (TOPIC_CONSOLE[0] && mqtt.connected()) {
+    mqtt.beginMessage(TOPIC_CONSOLE);
+    mqtt.print(line);
+    mqtt.endMessage();
+  }
+}
+
+// One attempt to publish, no waiting for an acknowledgement (QoS 0). Returns false when not connected.
+bool publish(const String &topic, const String &payload, bool retain = false) {
+  if (!mqtt.connected()) return false;
+  if (!mqtt.beginMessage(topic, retain)) return false;
+  mqtt.print(payload);
+  return mqtt.endMessage() == 1;
+}
+
+bool connected() {
+  return WiFi.status() == WL_CONNECTED && mqtt.connected();
+}
+
+// Called from loop(). When the connection is lost: at most one attempt every RETRY_MS, each attempt
+// limited by WIFI_TIMEOUT_MS and BROKER_TIMEOUT_MS. Between attempts loop() runs without waiting.
+void keepConnection() {
+  if (connected()) return;
+  if (!firstAttempt && millis() - lastAttempt < RETRY_MS) return;
+  firstAttempt = false;
+  lastAttempt = millis();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.print("Wi-Fi ");
+    Serial.print(SECRET_SSID);
+    if (WiFi.begin(SECRET_SSID, SECRET_PASS) != WL_CONNECTED) {
+      Serial.println(" FAILED, next attempt later");
+      return;
+    }
+    Serial.println(" OK");
+  }
+  // the board may report "connected" before the router has given an address (0.0.0.0): check again in 1 s
+  if (WiFi.localIP() == IPAddress(0, 0, 0, 0)) {
+    lastAttempt = millis() - RETRY_MS + 1000;
+    return;
+  }
+  Serial.print("address ");
+  Serial.print(WiFi.localIP());
+  Serial.print(", signal ");
+  Serial.print(WiFi.RSSI());
+  Serial.println(" dBm");
+
+  Serial.print("broker ");
+  Serial.print(BROKER);
+  if (SECRET_MQTT_USER[0]) mqtt.setUsernamePassword(SECRET_MQTT_USER, SECRET_MQTT_PASS);
+  if (!mqtt.connect(BROKER, PORT)) {
+    // -2 no TCP connection (address, port, firewall), -1 timeout, 4 wrong login or password, 5 not authorised
+    Serial.print(" FAILED, error ");
+    Serial.print(mqtt.connectError());
+    Serial.println(", next attempt later");
+    return;
+  }
+  Serial.println(" OK");
+  if (TOPIC_RESET[0]) mqtt.subscribe(TOPIC_RESET);
+  groupConnected();   // subscriptions are lost with the connection: renewed here
+}
+
+void onMessage(int size) {
+  String topic = mqtt.messageTopic();
+  bool retained = mqtt.messageRetain();
+  String payload;
+  while (mqtt.available()) payload += (char)mqtt.read();
+  if (TOPIC_RESET[0] && topic == TOPIC_RESET) {
+    if (!retained && payload == "reset") {
+      console("reset on request through the broker");
+      delay(100);
+      NVIC_SystemReset();
+    }
+    return;
+  }
+  groupMessage(topic, payload, retained);
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial && millis() < 3000) {}
+  Serial.println("\n== ADA512 LAB 3, template 2026-10-23");
+  WiFi.setTimeout(WIFI_TIMEOUT_MS);
+  mqtt.setConnectionTimeout(BROKER_TIMEOUT_MS);
+  mqtt.setKeepAliveInterval(15000);
+  // the identifier must be unique for each board: the MAC address of the board
+  byte mac[6];
+  WiFi.macAddress(mac);
+  char id[24];
+  snprintf(id, sizeof id, "ada512-%02x%02x%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  mqtt.setId(id);
+  Serial.print("client identifier ");
+  Serial.println(id);
+  mqtt.onMessage(onMessage);
+  groupSetup();
+}
+
+void loop() {
+  keepConnection();
+  mqtt.poll();       // receives messages; must be called often
+  groupLoop();
+}
+
+// ===================================================================================================
+// GROUP PART
+// ===================================================================================================
+// Available: console(line), publish(topic, payload, retain), connected(), millis().
+// Remember (LAB 3, the agreement): a drive is never retained.
+
+// ---------- settings of the group part ----------
+const String BASE = String("hl/") + STATION;     // "hl/hl-06"
+const uint8_t PIN_HEATER = 3;
+const uint8_t SENSOR_PINS[3] = {A0,A1,A2};     //
+const unsigned long TS_MS   = 10000;             // controller period Ts
+const unsigned long MEAS_MS = 1000;              // sensors read every second (T1 is checked in step 4)
+const float SP_MIN  = 20.0f, SP_MAX=40.0f;
+const float TMAX = 45.0f;
+const unsigned long T_WD_MS = 60000;
+const float T_LOW = 10.0f, T_HIGH = 80.0f;
+
+// ---------- own values: NTC3 (LAB 1), PI method 10 (LAB 2) ----------
+const float DELTA_T = 16.6f;   // settled rise at u = 100 %, NTC3 [K]
+const float T_P     = 307.0f;  // time constant, NTC3 [s]
+const float KR      = 0.399f;  // PI gain [1/K], u as fraction 0...1, as in LAB 2
+const float TI      = 168.0f;  // integral time [s]
+const float TS_S    = 10.0f;   // Ts [s]
+
+// ---------- measurement chain, LAB 1 ----------
+const uint8_t  ADC_BITS  = 14;
+const uint32_t ADC_MAX   = (1UL << ADC_BITS) - 1UL;
+const uint16_t AVG_COUNT = 100;
+const float R_FIXED = 10000.0f, NTC_R0 = 10000.0f, NTC_T0 = 298.15f, NTC_B = 3984.0f;
+const float K_CAL[3] = {0.97898f, 1.03903f, 0.98416f};   // LAB 1, same order as SENSOR_PINS
+
+float T[3]   = {NAN, NAN, NAN};    // latest readings [degC]
+bool  Tok[3] = {false, false, false};
+float hotOffset = 0.0f;
+
+float readAverageAdc(uint8_t pin) {
+  uint32_t sum = 0;
+  for (uint16_t i = 0; i < AVG_COUNT; ++i) sum += analogRead(pin);
+  return (float)sum / AVG_COUNT;
+}
+
+bool adcToTemperature(float adc, uint8_t ch, float &tC) {
+  if (adc <= 0.5f || adc >= (float)ADC_MAX - 0.5f) return false;   // open or shorted sensor
+  float r = R_FIXED * adc / ((float)ADC_MAX - adc);
+  r *= K_CAL[ch];
+  float invT = 1.0f / NTC_T0 + logf(r / NTC_R0) / NTC_B;
+  if (!isfinite(invT) || invT <= 0.0f) return false;
+  tC = 1.0f / invT - 273.15f;
+  return isfinite(tC);
+}
+
+void readSensors() {
+  for (uint8_t i = 0; i < 3; ++i) Tok[i] = adcToTemperature(readAverageAdc(SENSOR_PINS[i]), i, T[i]);
+  if (Tok[0]) T[0] += hotOffset;
+}
+
+// ---------- meas frame ----------
+// a failed sensor is sent as null: "nan" is not valid JSON
+String num(float x, bool ok, int dec) { return (ok && isfinite(x)) ? String(x, dec) : String("null"); }
+
+// {"seq":12,"t":120345,"T1":31.42,"T2":29.87,"T3":28.15}
+String measFrame(unsigned long seq, unsigned long t) {
+  return String("{\"seq\":") + seq + ",\"t\":" + t
+         + ",\"T1\":" + num(T[0], Tok[0], 2) + ",\"T2\":" + num(T[1], Tok[1], 2)
+         + ",\"T3\":" + num(T[2], Tok[2], 2) + "}";
+}
+
+String pidFrame(const char *from, unsigned long seq,
+                unsigned long echo, float u, float e, const char *st) {
+  return String("{\"from\":\"") + from
+         + "\",\"seq\":" + seq
+         + ",\"echo\":" + echo
+         + ",\"u\":" + String(u, 1)
+         + ",\"e\":" + String(e, 2)
+         + ",\"st\":\"" + st + "\"}";
+}
+
+// ---------- refused data ----------
+unsigned long nRefused = 0;
+void refuse(const String &why) {
+  nRefused++;
+  console(String("refused (") + nRefused + "): " + why);
+}
+
+unsigned long lastRead = 0, lastTick = 0;
+
+// ---------- state machine RUN / HOLD / SAFE ----------
+enum State { RUN, HOLD, SAFE };
+const char *ST_NAME[] = {"RUN", "HOLD", "SAFE"};
+
+State state = SAFE;                // start: heater off
+bool  latched = false;             // T1 > TMAX was seen; cleared only by a restart
+bool  haveData = false;            // no data accepted yet
+unsigned long lastAccepted = 0;    // millis() of the last accepted data
+bool  setpointValid = false;       // no setpoint yet
+float setpoint = 0.0f;             // [degC]
+bool  mute = false;                // test "mute": no data accepted
+
+float uCtrl = 0.0f;                // u from the controller [%]; 0 until step 5
+float uLast = 0.0f;                // last u of RUN, held in HOLD [%]
+float uOut  = 0.0f;                // u on the heater now [%]
+float I     = 0.0f;                // integral of e [K*s], PI method 10
+
+// The only place where the state changes. Order of the ifs = priority.
+void updateState() {
+  State old = state;
+  const char *why = "";
+  unsigned long age = millis() - lastAccepted;
+  if (Tok[0] && T[0] > TMAX) latched = true;           // own sensor, never a received value
+  if (latched)                         { state = SAFE; why = "T1 > TMAX, restart the board to leave"; }
+  else if (!Tok[0])                    { state = SAFE; why = "T1 sensor invalid"; }
+  else if (!setpointValid)             { state = SAFE; why = "no setpoint"; }
+  else if (!haveData || age > T_WD_MS) { state = SAFE; why = haveData ? "watchdog" : "no data yet"; }
+  else if (age > 2 * TS_MS)            { state = HOLD; why = "no accepted data for 2 Ts"; }
+  else                                 { state = RUN;  why = "data accepted"; }
+  if (state != old){
+    if(old==SAFE) I = 0.0f;
+    console(String(ST_NAME[old]) + " -> " + ST_NAME[state] + ": " + why);}
+}
+
+// The heater is set only from the state.
+void applyHeater() {
+  float u = 0.0f;
+  if (state == RUN)  { u = uCtrl; uLast = u; }
+  if (state == HOLD) u = uLast;
+  uOut = u;
+  analogWrite(PIN_HEATER, (int)(u * 2.55f + 0.5f));
+}
+
+// ---------- data path ----------
+unsigned long measSeq = 0;         // seq of the own meas frames
+unsigned long pidSeq  = 0;         // seq of the own pid frames
+unsigned long echoSeq = 0;         // seq of the meas the last accepted data come from
+float T3used = NAN;                // last accepted T3 [degC]
+float T3shared = NAN;
+unsigned long sharedSeq = 0;
+unsigned long lastSharedPrint = 0;
+const unsigned long SHARED_PRINT_INTERVAL = 10000;
+float eLast = 0.0f;                // last error [K]
+int   runMode = 2;                 // 1 constant u, 2 PI local, 3 PI through the broker
+float Tamb = NAN;                  // ambient [degC], for mode 1
+bool  pidThisPeriod = false;       // a pid frame was sent since the last tick
+bool  lateNext = false;            // test "late": next meas carries a t 30 s old
+String lastMeas;                   // last meas frame, for the test "dup"
+
+float u0_of(float thetaZ) {
+  return constrain(thetaZ / DELTA_T, 0.0f, 1.0f);
+}
+
+// With every accepted T3, in RUN only. Mode 1: constant u; modes 2, 3: PI, method 10.
+void control() {
+  if (state != RUN) return;                    // integral frozen in HOLD and SAFE
+  float e = setpoint - T3used;
+  if (runMode == 1) {
+    if (isnan(Tamb)) {
+      uCtrl = 0.0f;
+    }
+    else {
+      float thetaZ = setpoint - Tamb;
+      uCtrl = 100.0f * u0_of(thetaZ);
+    }
+  } else {
+    float Inew = I + e * TS_S;
+    float v = KR * (e + Inew / TI);
+    if (v >= 0.0f && v <= 1.0f) I = Inew;      // conditional integration (anti-windup)
+    uCtrl = 100.0f * constrain(KR * (e + I / TI), 0.0f, 1.0f);
+  }
+}
+
+// pid frame (never retained) and a D line on Serial for the plots
+void sendPid() {
+  eLast = (setpointValid && !isnan(T3used)) ? setpoint - T3used : 0.0f;
+  pidSeq++;
+  publish(SHARED_PID, pidFrame("hl-06", pidSeq, echoSeq, uOut, eLast, ST_NAME[state]));
+  pidThisPeriod = true;
+  //Serial.println(String("D,") + String(millis() / 1000.0f, 1) + "," + runMode + "," + ST_NAME[state]
+  //               + "," + (setpointValid ? String(setpoint, 1) : String("0")) + "," + num(T[0], Tok[0], 2)
+  //               + "," + num(T[1], Tok[1], 2) + "," + num(T3used, true, 2) + "," + String(uOut, 1)
+  //               + "," + String(eLast, 2) + "," + echoSeq);
+}
+
+// Accepted data: resets the watchdog, then state, controller, heater, pid frame.
+void accept(float T3, unsigned long seq) {
+  lastAccepted = millis();
+  haveData = true;
+  T3used = T3;
+  echoSeq = seq;
+  updateState();
+  control();
+  applyHeater();
+  sendPid();
+}
+
+// ---------- every Ts: measure, publish meas; modes 1, 2 use the own reading ----------
+void tick() {
+  if (runMode == 3 && !pidThisPeriod) sendPid();   // nothing came back last period: st stays visible
+  pidThisPeriod = false;
+  measSeq++;
+  unsigned long t = lateNext ? millis() - 3 * TS_MS : millis();   // t = millis() at the measurement
+  lateNext = false;
+  lastMeas = measFrame(measSeq, t);
+  publish(BASE + "/meas", lastMeas);
+  if (runMode == 3) return;                        // mode 3 waits for the frame to come back
+  if (mute)                               refuse("mute");
+  else if (!Tok[2])                       refuse("own T3 sensor invalid");
+  else if (T[2] < T_LOW || T[2] > T_HIGH) refuse(String("own T3 out of range: ") + String(T[2], 2));
+  else { accept(T[2], measSeq); return; }
+  updateState();
+  applyHeater();
+  sendPid();
+}
+
+// Number after "key": in a frame. True means there is a number, not that it is good.
+bool field(const String &p, const char *k, float &v) {
+  String key = String("\"") + k + "\":";
+  int i = p.indexOf(key);
+  if (i < 0) return false;
+  i += key.length();
+  char ch = p.charAt(i);
+  if (!(ch == '-' || (ch >= '0' && ch <= '9'))) return false;
+  v = p.substring(i).toFloat();
+  return true;
+}
+
+// Whole numbers (seq, t) without float: a float holds millis() exactly only up to 2^24 ms = 4.7 h.
+bool fieldUL(const String &p, const char *k, unsigned long &v) {
+  String key = String("\"") + k + "\":";
+  int i = p.indexOf(key);
+  if (i < 0) return false;
+  i += key.length();
+  if (!(p.charAt(i) >= '0' && p.charAt(i) <= '9')) return false;
+  v = strtoul(p.c_str() + i, nullptr, 10);
+  return true;
+}
+
+// ---------- mode 3: the own meas frame back from the broker ----------
+unsigned long rxSeq = 0;           // last accepted seq received back
+bool rxAny = false;
+
+// Both times come from the clock of this board: no clock synchronisation needed.
+void onOwnMeas(const String &p, bool retained) {
+  if (runMode != 3) return;
+  if (retained)                    { refuse("meas retained"); return; }
+  if (mute)                        { refuse("mute"); return; }
+  unsigned long seq, t, now = millis();
+  float T3;
+  if (!fieldUL(p, "seq", seq))     { refuse("meas: no seq"); return; }
+  if (!fieldUL(p, "t", t))         { refuse("meas: no t"); return; }
+  //if (seq > measSeq)               { refuse(String("meas: seq ") + seq + " not sent yet"); return; }
+  //if (rxAny && seq <= rxSeq)       { refuse(String("meas: old or repeated seq ") + seq); return; }
+  //if ((long)(now - t) < 0)         { refuse(String("meas: t in the future, seq ") + seq); return; }
+  unsigned long rtt = now - t;
+  //if (rtt > 2 * TS_MS)             { refuse(String("meas: late, ") + rtt + " ms, seq " + seq); return; }
+  if (!field(p, "T3", T3))         { refuse(String("meas: no T3, seq ") + seq); return; }
+  if (T3 < T_LOW || T3 > T_HIGH)   { refuse(String("meas: T3 out of range ") + String(T3, 2)); return; }
+  if (rxAny && seq > rxSeq + 1) console(String("meas: ") + (seq - rxSeq - 1) + " frame(s) missing or refused before seq " + seq);
+  rxSeq = seq;
+  rxAny = true;
+  //Serial.println(String("R,") + seq + "," + rtt);
+  accept(T3, seq);
+}
+// ---------- setpoint from the broker (own sp command or the teacher) ----------
+void onSetpoint(const String &payload, bool retained) {
+  String s = payload;
+  s.trim();
+  char c = s.length() ? s.charAt(0) : 0;
+  if (!(c == '-' || (c >= '0' && c <= '9'))) { refuse(String("setpoint not a number: ") + s); return; }
+  float v = s.toFloat();
+  if (v == 0.0f) {
+    setpointValid = false;
+    console("setpoint 0: heater off");
+  } else if (v >= SP_MIN && v <= SP_MAX) {
+    setpoint = v;
+    setpointValid = true;
+    console(String("setpoint accepted: ") + String(v, 1) + (retained ? " (retained)" : ""));
+  } else {
+    refuse(String("setpoint refused: ") + String(v, 1) + ", kept "
+           + (setpointValid ? String(setpoint, 1) : String("none")));
+  }
+}
+
+// ---------- ambient: "amb" measures T3 for 180 s, heater off ----------
+bool ambOn = false;
+unsigned long ambEnd = 0, ambN = 0;
+float ambSum = 0.0f;
+
+void ambientStep() {                   // after every sensor reading
+  if (!ambOn) return;
+  if (uOut > 0.0f) { ambOn = false; console("amb stopped: heater on"); return; }
+  if (Tok[2]) { ambSum += T[2]; ambN++; }
+  if ((long)(millis() - ambEnd) >= 0) {
+    ambOn = false;
+    if (ambN > 0) Tamb = ambSum / ambN;
+    console(String("ambient ") + String(Tamb, 2) + " degC from " + ambN + " readings");
+  }
+}
+// ---------- serial commands ----------
+void command(String s) {
+  s.trim();
+  if (s.startsWith("sp ")) {
+    String v = String(s.substring(3).toFloat(), 1);
+    if (publish(SHARED_SP, v, true)) console(String("setpoint sent, retained: ") + v);
+    else console("not connected: setpoint not sent");
+  } else if (s.startsWith("mode ")) {
+    int m = s.substring(5).toInt();
+    if (m < 1 || m > 3)             console("mode must be 1, 2 or 3");
+    else if (m == 1 && isnan(Tamb)) console("mode 1 needs amb first");
+    else { runMode = m; rxAny = false; console(String("mode ") + m); }
+  } else if (s == "amb") {
+    if (setpointValid) console("amb needs the heater off: sp 0 first");
+    else { ambOn = true; ambSum = 0.0f; ambN = 0; ambEnd = millis() + 180000UL;
+           console("measuring ambient on T3, 180 s, heater off"); }
+  } else if (s.startsWith("amb ")) {
+    float v = s.substring(4).toFloat();
+    if (v > 5.0f && v < 35.0f) { Tamb = v; console(String("ambient ") + String(v, 2) + " degC"); }
+    else console("amb out of range");
+  } else if (s == "mute") {
+    mute = !mute;
+    console(mute ? "test mute: data not accepted" : "test mute off");
+  } else if (s == "hot") {
+    hotOffset = (hotOffset > 0.0f) ? 0.0f : 30.0f;
+    console(hotOffset > 0.0f ? "test hot: T1 + 30 K" : "test hot off");
+  } else if (s == "dup") {
+    publish(BASE + "/meas", lastMeas);
+    console("test dup: last meas sent again");
+  } else if (s == "late") {
+    lateNext = true;
+    console("test late: next meas carries a t 30 s old");
+  } else if (s == "?") {
+    console(String("mode ") + runMode + ", st " + ST_NAME[state]
+            + ", sp " + (setpointValid ? String(setpoint, 1) : String("none"))
+            + ", amb " + (isnan(Tamb) ? String("none") : String(Tamb, 2))
+            + ", T1 " + num(T[0], Tok[0], 2) + ", T3 " + num(T[2], Tok[2], 2)
+            + ", u " + String(uOut, 1) + ", refused " + nRefused
+            + ", KR " + String(KR, 3) + ", TI " + String(TI, 0) + ", twd " + (T_WD_MS / 1000) + " s");
+  } else if (s.length()) {
+    console(String("unknown command: ") + s);
+  }
+}
+
+// ---------- template hooks ----------
+String lineIn;
+void readSerial() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') { command(lineIn); lineIn = ""; }
+    else if (lineIn.length() < 40) lineIn += c;
+  }
+}
+
+void groupSetup() {
+  pinMode(PIN_HEATER, OUTPUT);
+  analogWrite(PIN_HEATER, 0);              // rule 1: heater off at start
+  analogReadResolution(ADC_BITS);
+  readSensors();
+  lastRead = millis();
+  lastTick = millis() - TS_MS;             // first meas at once
+  console("start in SAFE");
+  Serial.println("# D,t_s,mode,st,sp,T1,T2,T3,u,e,echo");
+  Serial.println("# R,seq,rtt_ms");
+}
+
+void groupConnected() {
+  console(String("connected, st ") + ST_NAME[state] + ", sp "
+          + (setpointValid ? String(setpoint, 1) : String("none")));
+  mqtt.subscribe(SHARED_MEAS);      // the retained setpoint arrives at once
+  mqtt.subscribe(SHARED_SP);          // own meas back, mode 3
+}
+
+void groupLoop() {
+  readSerial();
+  if (millis() - lastRead >= MEAS_MS) { lastRead += MEAS_MS; readSensors(); ambientStep(); }
+  if (millis() - lastTick >= TS_MS)   { lastTick += TS_MS;   tick(); }
+  updateState();                           // every pass: never waits for the network
+  applyHeater();
+}
+
+void groupMessage(
+  const String &topic,
+  const String &payload,
+  bool retained
+) {
+  if (topic == SHARED_MEAS) {
+
+    if (retained) {
+      refuse("retained measurement");
+      return;
+    }
+
+    unsigned long seq, t;
+    float T3;
+
+    if (!fieldUL(payload, "seq", seq) ||
+        !fieldUL(payload, "t", t) ||
+        !field(payload, "T3", T3)) {
+      refuse("invalid shared measurement");
+      return;
+    }
+
+    if (T3 < T_LOW || T3 > T_HIGH) {
+      refuse("shared T3 out of range");
+      return;
+    }
+
+    // Store shared plant temperature
+    T3shared = T3;
+    sharedSeq = seq;
+
+    // Print shared plant temperature at most once every 10 seconds
+    if (millis() - lastSharedPrint >= SHARED_PRINT_INTERVAL) {
+      lastSharedPrint = millis();
+
+      Serial.println(
+        String("SHARED,") +
+        String(millis() / 1000.0f, 1) + "," +
+        String(seq) + "," +
+        String(T3shared, 2)
+      );
+}
+
+    // Use received measurement in controller
+    onOwnMeas(payload, retained);
+  }
+  else if (topic == SHARED_SP) {
+    onSetpoint(payload, retained);
+  }
+}
+
+//void groupMessage(const String &topic, const String &payload, bool retained) {
+//  if (topic == SHARED_MEAS)  onSetpoint(payload, retained);
+//  else if (topic == SHARED_SP) onOwnMeas(payload, retained);
+//}
